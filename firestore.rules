@@ -1,0 +1,161 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    // SuperAdmin Identity
+    function isSuperAdmin() {
+      return isSignedIn() && request.auth.token.email == 'sunmonuolawaleemmanuel@gmail.com';
+    }
+
+    // Role lookups
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        getUserRole() == 'admin'
+      );
+    }
+
+    function isDoctor() {
+      return isSuperAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        getUserRole() == 'doctor'
+      );
+    }
+
+    // --- Collections ---
+
+    match /users/{uid} {
+      function isValidUser(data) {
+        return data.keys().hasAll(['userId', 'name', 'email', 'role', 'createdAt']) &&
+               data.keys().size() == 5 &&
+               data.userId == uid &&
+               data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+               data.email is string && data.email.size() <= 100 &&
+               data.role in ['patient', 'doctor', 'admin'] &&
+               data.createdAt is string;
+      }
+
+      allow get: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == uid && isValidUser(incoming());
+      allow update: if isSignedIn() && (request.auth.uid == uid || isAdmin()) &&
+                      incoming().userId == uid &&
+                      incoming().role == existing().role &&
+                      isValidUser(incoming());
+
+      match /patientData/profile {
+        allow read: if request.auth.uid == uid || isDoctor() || isAdmin();
+        allow create, update: if request.auth.uid == uid || isAdmin();
+      }
+      match /doctorData/profile {
+        allow read: if isSignedIn();
+        allow create, update: if request.auth.uid == uid || isAdmin();
+      }
+    }
+
+    match /appointments/{id} {
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().patientId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+    }
+
+    match /triageRecords/{id} {
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().patientId == request.auth.uid;
+    }
+
+    match /medicalRecords/{id} {
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isDoctor() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /notifications/{id} {
+      allow read, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow create: if isAdmin() || isDoctor();
+    }
+
+    match /intakeForms/{id} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+      allow update: if isDoctor() || isAdmin();
+    }
+
+    match /invoices/{id} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update: if isAdmin();
+    }
+
+    match /transactions/{id} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update: if isAdmin();
+    }
+
+    match /healthLogs/{id} {
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().patientId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.patientId == request.auth.uid && incoming().patientId == request.auth.uid;
+    }
+
+    match /messages/{id} {
+      allow read: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().senderId == request.auth.uid;
+    }
+
+    match /auditLogs/{id} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn();
+    }
+
+    match /emergencySessions/{id} {
+      function isValidSession(data) {
+        return data.keys().hasAll(['patientId', 'patientName', 'status', 'urgency', 'timestamp']) &&
+               data.patientId is string &&
+               data.patientName is string &&
+               data.status in ['active', 'resolved', 'escalated'] &&
+               data.urgency in ['critical', 'high'];
+      }
+
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || isDoctor() || isAdmin());
+      allow create: if isSignedIn() && incoming().patientId == request.auth.uid && isValidSession(incoming());
+      allow update: if isSignedIn() && (
+        // Patient updating their own vitals or status
+        (resource.data.patientId == request.auth.uid && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['vitals', 'status', 'timestamp', 'location']) &&
+         isValidSession(incoming())) ||
+        // Doctor joining or taking notes
+        ((isDoctor() || isAdmin()) && 
+         incoming().diff(existing()).affectedKeys().hasAny(['doctorName', 'clinicalNotes', 'status']) &&
+         isValidSession(incoming()))
+      );
+    }
+
+    match /pagingRequests/{id} {
+      allow read: if isSignedIn() && (isDoctor() || isAdmin());
+      allow create, update: if isSignedIn();
+    }
+    
+    // Connection test
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}

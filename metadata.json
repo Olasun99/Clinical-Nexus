@@ -1,0 +1,12 @@
+{
+  "name": "OlaSun Clinical Nexus",
+  "description": "An award-winning digital health platform for zero-friction patient care, high-precision AI triage, and collaborative clinical operations.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
